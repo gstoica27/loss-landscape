@@ -24,6 +24,12 @@ import model_loader
 import scheduler
 import mpi4pytorch as mpi
 
+
+from data.shapeworld.corpus import ShapeWorldLoader
+from data.shapeworld.utils import *
+from trainer import Trainer
+from utils import print_dict, get_save_dir, append_data, read_yaml, save_pickle, save_yaml
+
 def name_surface_file(args, dir_file):
     # skip if surf_file is specified in args
     if args.surf_file:
@@ -48,6 +54,7 @@ def name_surface_file(args, dir_file):
 
 def setup_surface_file(args, surf_file, dir_file):
     # skip if the direction file already exists
+    # import pdb; pdb.set_trace()
     if os.path.exists(surf_file):
         f = h5py.File(surf_file, 'r')
         if (args.y and 'ycoordinates' in f.keys()) or 'xcoordinates' in f.keys():
@@ -59,18 +66,19 @@ def setup_surface_file(args, surf_file, dir_file):
     f['dir_file'] = dir_file
 
     # Create the coordinates(resolutions) at which the function is evaluated
-    xcoordinates = np.linspace(args.xmin, args.xmax, num=args.xnum)
+    # import pdb; pdb.set_trace()
+    xcoordinates = np.linspace(int(args.xmin), int(args.xmax), num=int(args.xnum))
     f['xcoordinates'] = xcoordinates
 
     if args.y:
-        ycoordinates = np.linspace(args.ymin, args.ymax, num=args.ynum)
+        ycoordinates = np.linspace(int(args.ymin), int(args.ymax), num=int(args.ynum))
         f['ycoordinates'] = ycoordinates
     f.close()
 
     return surf_file
 
 
-def crunch(surf_file, net, w, s, d, dataloader, loss_key, acc_key, comm, rank, args):
+def crunch(surf_file, net, w, s, d, dataset, split_name, config, loss_key, acc_key, comm, rank, args):
     """
         Calculate the loss values and accuracies of modified models in parallel
         using MPI reduce.
@@ -118,7 +126,7 @@ def crunch(surf_file, net, w, s, d, dataloader, loss_key, acc_key, comm, rank, a
 
         # Record the time to compute the loss value
         loss_start = time.time()
-        loss, acc = evaluation.eval_loss(net, criterion, dataloader, args.cuda)
+        loss, acc = evaluation.eval_loss(net, criterion, dataset, split_name, config, args.cuda)
         loss_compute_time = time.time() - loss_start
 
         # Record the result in the local array
@@ -180,6 +188,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_file2', default='', help='use (model_file2 - model_file) as the xdirection')
     parser.add_argument('--model_file3', default='', help='use (model_file3 - model_file) as the ydirection')
     parser.add_argument('--loss_name', '-l', default='crossentropy', help='loss functions: crossentropy | mse')
+    parser.add_argument('--model_config', default='', help='path to model config file')
 
     # direction parameters
     parser.add_argument('--dir_file', default='', help='specify the name of direction file, or the path to an eisting direction file')
@@ -241,7 +250,19 @@ if __name__ == '__main__':
     #--------------------------------------------------------------------------
     # Load models and extract parameters
     #--------------------------------------------------------------------------
-    net = model_loader.load(args.dataset, args.model, args.model_file)
+    # net = model_loader.load(args.dataset, args.model, args.model_file)
+    config = read_yaml(args.model_config)
+
+    config['use_cuda'] = True
+    config['network_type'] = args.model
+    config['dataset']['artificial_and'] = config['artificial_and']
+    dataloader = ShapeWorldLoader(config=config['dataset'])
+    config['vocab'] = dataloader.vocab
+    
+    trainer = Trainer(config)
+    trainer.model.load_model(args.model_file)
+    net = trainer.model
+    net.cpu()
     w = net_plotter.get_weights(net) # initial parameters
     s = copy.deepcopy(net.state_dict()) # deepcopy since state_dict are references
     if args.ngpu > 1:
@@ -278,15 +299,17 @@ if __name__ == '__main__':
 
     mpi.barrier(comm)
 
-    trainloader, testloader = dataloader.load_dataset(args.dataset, args.datapath,
-                                args.batch_size, args.threads, args.raw_data,
-                                args.data_split, args.split_idx,
-                                args.trainloader, args.testloader)
+    # trainloader, testloader = dataloader.load_dataset(args.dataset, args.datapath,
+    #                             args.batch_size, args.threads, args.raw_data,
+    #                             args.data_split, args.split_idx,
+    #                             args.trainloader, args.testloader)
+
+    
 
     #--------------------------------------------------------------------------
     # Start the computation
     #--------------------------------------------------------------------------
-    crunch(surf_file, net, w, s, d, trainloader, 'train_loss', 'train_acc', comm, rank, args)
+    crunch(surf_file, net, w, s, d, dataloader.dataset, 'train', config, 'train_loss', 'train_acc', comm, rank, args)
     # crunch(surf_file, net, w, s, d, testloader, 'test_loss', 'test_acc', comm, rank, args)
 
     #--------------------------------------------------------------------------
